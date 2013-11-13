@@ -81,6 +81,8 @@ type Config struct {
 	// TODO proxy
 	// TODO ca_certs
 	// TODO tracefile
+
+	AudioConsumer AudioConsumer
 }
 
 // Connection state describes the state of the connection of a session.
@@ -139,6 +141,8 @@ type Session struct {
 	sp_session *C.sp_session
 	mu         sync.Mutex
 
+	audioConsumer AudioConsumer
+
 	events chan event
 
 	metadataUpdatesMu sync.Mutex
@@ -185,6 +189,8 @@ func NewSession(config *Config) (*Session, error) {
 		states:           make(chan struct{}, 1),
 		loggedIn:         make(chan error, 1),
 		loggedOut:        make(chan struct{}, 1),
+
+		audioConsumer: config.AudioConsumer,
 	}
 
 	if err := session.setupConfig(config); err != nil {
@@ -410,6 +416,11 @@ func (s *Session) FlushCaches() error {
 	return spError(C.sp_session_flush_caches(s.sp_session))
 }
 
+// SetAudioConsumer sets the audio consumer.
+func (s *Session) SetAudioConsumer(c AudioConsumer) {
+	s.audioConsumer = c
+}
+
 // ConnectionState returns the current connection state for the
 // session.
 func (s *Session) ConnectionState() ConnectionState {
@@ -453,6 +464,12 @@ type AudioFormat struct {
 
 	// Number of channels. Currently 1 or 2.
 	Channels int
+}
+
+func (af *AudioFormat) Equal(u *AudioFormat) bool {
+	return af.SampleType == u.SampleType &&
+		af.SampleRate == u.SampleRate &&
+		af.Channels == u.Channels
 }
 
 func cbool(b bool) C.bool {
@@ -899,8 +916,10 @@ func (s *Session) cbNotifyMainThread() {
 // cbMusicDelivery is called when there is decompressed audio data available.
 // NOTE: This function must never block.
 func (s *Session) cbMusicDelivery(format *AudioFormat, frames []byte) int {
-	// TODO deliver frames. use io.Writer?
-	return len(frames)
+	if s.audioConsumer == nil {
+		return 0
+	}
+	return s.audioConsumer.WriteAudio(format, frames)
 }
 
 func (s *Session) cbPlayTokenLost() {
@@ -1010,7 +1029,7 @@ func go_music_delivery(spSession unsafe.Pointer, format *C.sp_audioformat, data 
 	s := (*C.sp_session)(spSession)
 	session := (*Session)(C.sp_session_userdata(s))
 	// TODO might be nice to do zero copy here
-	frames := C.GoBytes(data, num_frames)
+	frames := C.GoBytes(data, num_frames*format.channels)
 	audioFormat := &AudioFormat{
 		SampleType(format.sample_type),
 		int(format.sample_rate),
@@ -1127,6 +1146,10 @@ func go_toplistbrowse_complete(sp_toplistsearch unsafe.Pointer, userdata unsafe.
 	default:
 		panic("spotify: unhandled toplist type")
 	}
+}
+
+type AudioConsumer interface {
+	WriteAudio(*AudioFormat, []byte) int
 }
 
 type player struct {
